@@ -1,0 +1,82 @@
+// SPDX-License-Identifier: MIT
+
+pragma solidity ^0.8.11;
+
+import "./Ownable.sol";
+import "./Strings.sol";
+import "./ERC2771Context.sol";
+import "./MerkleProof.sol";
+import "./Pausable.sol";
+import "./Strings.sol";
+
+interface ICollectible {
+    function balanceOf(address account, uint256 id) external view returns (uint256);
+
+    function safeTransferFrom(
+        address from,
+        address to,
+        uint256 id,
+        uint256 amount,
+        bytes calldata data
+    ) external;
+
+    function isApprovedForAll(
+        address account, 
+        address operator
+    ) external view returns (bool);
+}
+
+contract ClaimReferral is ERC2771Context, Ownable, Pausable {
+    mapping(address => mapping(string => bool)) public userCodeClaimed;
+    mapping(address => mapping(string => bytes32)) public userTokenRoot;
+
+    event ClaimedWithReferral(address indexed from, address indexed tokenAddress, uint256 indexed tokenId, address by, string referral);
+
+    constructor(address _trustedForwarder) ERC2771Context(_trustedForwarder){}
+
+    ///////Set Merkle Root of the msg sender
+    function setMerkleRoot(address tokenAddress, uint256 tokenId, bytes32 root) public{
+        string memory id = Strings.toString(tokenId);
+        string memory mapId = string(abi.encodePacked(tokenAddress,id));
+        userTokenRoot[_msgSender()][mapId] = root;
+    }
+
+    ///////Anyone with referral code can claim through root forwarder (only executed by root relayer)
+    function claimTokenWithReferral(address from, address tokenAddress, uint256 tokenId, string memory referral, bytes32[] calldata proof) public whenNotPaused{
+        require(isTrustedForwarder(msg.sender), "Invalid caller");
+        bytes32 leaf = keccak256(abi.encodePacked(referral));
+        string memory id = Strings.toString(tokenId);
+        string memory mapId = string(abi.encodePacked(tokenAddress,id));
+        bytes32 merkleroot = userTokenRoot[from][mapId];
+        require(MerkleProof.verifyCalldata(proof, merkleroot, leaf), "Invalid proof or code");
+        require(!userCodeClaimed[from][referral], "used code");
+        bool approved = ICollectible(tokenAddress).isApprovedForAll(from, address(this));
+        require(approved, "Owner not approved");
+        uint256 balance = ICollectible(tokenAddress).balanceOf(from, tokenId);
+        require(balance >= 1, "No balance left to claim");
+        ICollectible(tokenAddress).safeTransferFrom(from, _msgSender(), tokenId, 1, "");
+        userCodeClaimed[from][referral] = true;
+        emit ClaimedWithReferral(from, tokenAddress, tokenId, _msgSender(), referral);
+    }
+
+      // Forwarder override 
+    function _msgSender() internal view virtual override(Context, ERC2771Context)
+      returns (address sender) {
+        sender = ERC2771Context._msgSender(); 
+    }
+
+    function _msgData() internal view virtual override(Context, ERC2771Context)
+      returns (bytes calldata) {
+        return ERC2771Context._msgData();       
+    }
+
+    function pause() public onlyOwner{
+        if(!paused())
+            _pause();
+    }
+
+    function unpause() public onlyOwner{
+        if(paused())
+            _unpause();
+    }
+}
